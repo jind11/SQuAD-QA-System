@@ -2,38 +2,26 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import time
 import logging
+
 import numpy as np
+from six.moves import xrange  # pylint: disable=redefined-builtin
 import tensorflow as tf
+from tensorflow.python.ops import variable_scope as vs
 
-logging.basicConfig(level=logging.INFO)
+from util import variable_summaries
 
-class Decoder(object):
-    def __init__(self, hidden_size):
+
+class Decoder():
+    def __init__(self, hidden_size, summary_flag):
         self.hidden_size = hidden_size
-
-    def BiLSTM_2layer(self, inputs, masks, scope_name, dropout):
-        with tf.variable_scope(scope_name):
-            lstm_fw_cell0 = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.LSTMCell(self.hidden_size), output_keep_prob = dropout)
-            lstm_bw_cell0 = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.LSTMCell(self.hidden_size), output_keep_prob = dropout)
-            lstm_fw_cell1 = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.LSTMCell(self.hidden_size), output_keep_prob = dropout)
-            lstm_bw_cell1 = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.LSTMCell(self.hidden_size), output_keep_prob = dropout)
-            lstm_fw_cells = [lstm_fw_cell0] + [lstm_fw_cell1]
-            lstm_bw_cells = [lstm_bw_cell0] + [lstm_bw_cell1]
-            lstm_fw_cell = tf.contrib.rnn.MultiRNNCell(lstm_fw_cells, state_is_tuple=True)
-            lstm_bw_cell = tf.contrib.rnn.MultiRNNCell(lstm_bw_cells, state_is_tuple=True)
-            seq_len = tf.reduce_sum(tf.cast(masks, tf.int32), axis=1)
-            outputs, _ = tf.nn.bidirectional_dynamic_rnn(
-                lstm_fw_cell, lstm_bw_cell, inputs = inputs, sequence_length = seq_len, dtype=tf.float32
-            )
-            hidden_outputs = tf.concat(outputs, 2)
-
-        return hidden_outputs
+        self.summary_flag = summary_flag
 
     def BiLSTM(self, inputs, masks, scope_name, dropout):
         with tf.variable_scope(scope_name):
-            lstm_fw_cell = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.LSTMCell(self.hidden_size), output_keep_prob = dropout)
-            lstm_bw_cell = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.LSTMCell(self.hidden_size), output_keep_prob = dropout)
+            lstm_fw_cell = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.BasicLSTMCell(self.hidden_size), output_keep_prob = dropout)
+            lstm_bw_cell = tf.contrib.rnn.DropoutWrapper(tf.contrib.rnn.BasicLSTMCell(self.hidden_size), output_keep_prob = dropout)
             seq_len = tf.reduce_sum(tf.cast(masks, tf.int32), axis=1)
             outputs, _ = tf.nn.bidirectional_dynamic_rnn(
                 lstm_fw_cell, lstm_bw_cell, inputs = inputs, sequence_length = seq_len, dtype=tf.float32
@@ -42,88 +30,36 @@ class Decoder(object):
 
         return hidden_outputs
 
-    # def prediction(self, I3):
-    #     xavier_initializer = tf.contrib.layers.xavier_initializer()
-    #     with tf.variable_scope('output_layer'):
-    #         w_s_f = tf.get_variable('w_start_f', shape=(2 * self.hidden_size, 1),
-    #                                 initializer=xavier_initializer)
-    #         w_e_f = tf.get_variable('w_end_f', shape=(2 * self.hidden_size, 1),
-    #                                 initializer=xavier_initializer)
-    #         w_s_b = tf.get_variable('w_start_b', shape=(2 * self.hidden_size, 1),
-    #                                 initializer=xavier_initializer)
-    #         w_e_b = tf.get_variable('w_end_b', shape=(2 * self.hidden_size, 1),
-    #                                 initializer=xavier_initializer)
-    #         w_h_f = tf.get_variable('w_hidden_f', shape=(self.hidden_size, 1),
-    #                                 initializer=xavier_initializer)
-    #         w_h_b = tf.get_variable('w_hidden_b', shape=(self.hidden_size, 1),
-    #                                 initializer=xavier_initializer)
-    #         self.batch_size = tf.shape(I3)[0]
-    #         w_s_f = tf.tile(tf.expand_dims(w_s_f, 0), [self.batch_size, 1, 1]) # (?, 2h, 1)
-    #         w_e_f = tf.tile(tf.expand_dims(w_e_f, 0), [self.batch_size, 1, 1])
-    #         w_s_b = tf.tile(tf.expand_dims(w_s_b, 0), [self.batch_size, 1, 1])
-    #         w_e_b = tf.tile(tf.expand_dims(w_e_b, 0), [self.batch_size, 1, 1])
-    #         w_h_f = tf.tile(tf.expand_dims(w_h_f, 0), [self.batch_size, 1, 1])
-    #         w_h_b = tf.tile(tf.expand_dims(w_h_b, 0), [self.batch_size, 1, 1]) # (?, h, 1)
-
-    #         pred_s_f = tf.nn.softmax(tf.squeeze(tf.matmul(I3, w_s_f), 2)) # (?, m)
-    #         pred_e_b = tf.nn.softmax(tf.squeeze(tf.matmul(I3, w_e_b), 2)) # (?, m)
-
-    #         with tf.variable_scope('forward'):
-    #             lstm_fw_cell = tf.contrib.rnn.LSTMCell(self.hidden_size)
-    #             lstm_fw_input = tf.squeeze(tf.matmul(tf.transpose(I3, perm=(0,2,1)), tf.expand_dims(pred_s_f, 2)), 2) # (?, 2h)
-    #             hidden_fw, _ = tf.contrib.rnn.static_rnn(lstm_fw_cell, [lstm_fw_input], dtype=tf.float32) # (?, h)
-    #             hidden_fw = tf.expand_dims(hidden_fw[0], 1) # (?, 1, h)
-
-    #         with tf.variable_scope('backward'):
-    #             lstm_bw_cell = tf.contrib.rnn.LSTMCell(self.hidden_size)
-    #             lstm_bw_input = tf.squeeze(tf.matmul(tf.transpose(I3, perm=(0,2,1)), tf.expand_dims(pred_e_b, 2)), 2) # (?, 2h)
-    #             hidden_bw, _ = tf.contrib.rnn.static_rnn(lstm_bw_cell, [lstm_bw_input], dtype=tf.float32)
-    #             hidden_bw = tf.expand_dims(hidden_bw[0], 1) # (?, 1, h)
-
-    #         pred_e_f = tf.nn.softmax(tf.squeeze(tf.matmul(I3, w_e_f), 2) + tf.squeeze(tf.matmul(hidden_fw, w_h_f), 2)) # (?, m)
-    #         pred_s_b = tf.nn.softmax(tf.squeeze(tf.matmul(I3, w_s_b), 2) + tf.squeeze(tf.matmul(hidden_bw, w_h_b), 2)) # (?, m)
-
-    #         pred_e_f = tf.nn.softmax(tf.squeeze(tf.matmul(I3, w_e_f), 2)) # (?, m)
-    #         pred_s_b = tf.nn.softmax(tf.squeeze(tf.matmul(I3, w_s_b), 2)) # (?, m)
-
-    #         pred_s = (pred_s_f + pred_s_b) / 2
-    #         pred_e = (pred_e_f + pred_e_b) / 2
-
-    #         return pred_s, pred_e
-
-    def prediction(self, I3, context_mask, scope_name, dropout):
-        xavier_initializer = tf.contrib.layers.xavier_initializer()
+    def output_layer(self, G, M, context_mask,dropout, scope_name):
+        # M (?, m, 2h)
+        # the softmax part is implemented together with loss function
         with tf.variable_scope(scope_name):
-            w_s = tf.get_variable('w_start_f', shape=(2 * self.hidden_size, 1),
-                                    initializer=xavier_initializer)
-            w_e = tf.get_variable('w_end_f', shape=(2 * self.hidden_size, 1),
-                                    initializer=xavier_initializer)
+            w_1 = tf.get_variable('w_start', shape=(10 * self.hidden_size, 1),
+                initializer=tf.contrib.layers.xavier_initializer())
+            w_2 = tf.get_variable('w_end', shape=(10 * self.hidden_size, 1),
+                initializer=tf.contrib.layers.xavier_initializer())
 
-            self.batch_size = tf.shape(I3)[0]
-            w_s = tf.tile(tf.expand_dims(w_s, 0), [self.batch_size, 1, 1]) # (?, 2h, 1)
-            w_e = tf.tile(tf.expand_dims(w_e, 0), [self.batch_size, 1, 1])
+            if self.summary_flag:
+                variable_summaries(w_1, "output_w_1")
+                variable_summaries(w_2, "output_w_2")
 
-            I3_fw = self.BiLSTM(I3, context_mask, scope_name, dropout)
+            self.batch_size = tf.shape(M)[0]
 
-            pred_s = tf.nn.softmax(tf.squeeze(tf.matmul(I3, w_s), 2)) # (?, m)
-            pred_e = tf.nn.softmax(tf.squeeze(tf.matmul(I3_fw, w_e), 2)) # (?, m)
+            # M2 = self.BiLSTM(M, context_mask, scope_name, dropout)
 
+            temp1 = tf.concat([G, M], 2)  # (?, m, 10h)
+            temp2 = tf.concat([G, M], 2)  # (?, m, 10h)
+            temp_1_o = tf.nn.dropout(temp1, dropout)
+            temp_2_o = tf.nn.dropout(temp2, dropout)
+
+            w_1_tiled = tf.tile(tf.expand_dims(w_1, 0), [self.batch_size, 1, 1])
+            w_2_tiled = tf.tile(tf.expand_dims(w_2, 0), [self.batch_size, 1, 1])
+
+            pred_s = tf.squeeze(tf.einsum('aij,ajk->aik',temp_1_o, w_1_tiled)) # (?, m, 10h) * (?, 10h, 1) -> (?, m, 1)
+            pred_e = tf.squeeze(tf.einsum('aij,ajk->aik',temp_2_o, w_2_tiled)) # (?, m, 10h) * (?, 10h, 1) -> (?, m, 1)
             return pred_s, pred_e
 
-    def decode(self, I, context_mask, dropout):
-        """
-        takes in a knowledge representation
-        and output a probability estimation over
-        all paragraph tokens on which token should be
-        the start of the answer span, and which should be
-        the end of the answer span.
-
-        :param knowledge_rep: it is a representation of the paragraph and question,
-                              decided by how you choose to implement the encoder
-        :return:
-        """
-        # I3 = self.Res_BiLSTM(I, context_mask, 'inference_layer', dropout) # (?, m, 2h)
-        I3 = self.BiLSTM(I, context_mask, 'inference_layer', dropout)
-        pred_s, pred_e = self.prediction(I3, context_mask, 'predict_layer', dropout)
-
+    def decode(self, G, context_mask, dropout):
+        M = self.BiLSTM(G, context_mask, 'model_layer',dropout)
+        pred_s, pred_e = self.output_layer(G, M, context_mask, dropout, 'output_layer')
         return pred_s, pred_e

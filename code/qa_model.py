@@ -14,6 +14,8 @@ from evaluate import exact_match_score, f1_score
 from util import Progbar, minibatches
 
 logging.basicConfig(level=logging.INFO)
+# tf.logging.set_verbosity(tf.logging.ERROR)
+logging.getLogger("tensorflow").setLevel(logging.ERROR)
 
 
 class QASystem(object):
@@ -42,6 +44,8 @@ class QASystem(object):
         self.dropout = flags.dropout
         self.decay_number = flags.decay_number
         self.decay_rate = flags.decay_rate
+        self.summary_dir = flags.summary_dir
+        self.summary_flag = flags.summary_flag
 
 
         # ==== set up placeholder tokens ========
@@ -49,10 +53,10 @@ class QASystem(object):
         self.context_mask_placeholder = tf.placeholder(tf.bool, shape=(None, self.max_context_len))
         self.question_placeholder = tf.placeholder(tf.int32, shape=(None, self.max_question_len))
         self.question_mask_placeholder = tf.placeholder(tf.bool, shape=(None, self.max_question_len))
-        self.ans_start_placeholder = tf.placeholder(tf.int32, shape=(None,))
-        self.ans_end_placeholder = tf.placeholder(tf.int32, shape=(None,))
+        self.ans_start_placeholder = tf.placeholder(tf.int32, shape=(None, self.max_context_len))
+        self.ans_end_placeholder = tf.placeholder(tf.int32, shape=(None, self.max_context_len))
         self.dropout_placeholder = tf.placeholder(tf.float32)
-        self.global_batch_num_placeholder = tf.placeholder(tf.int32)
+        self.global_batch_num_placeholder = tf.placeholder(tf.int32, shape=(None))
 
         # ==== assemble pieces ====
         with tf.variable_scope("qa", initializer=tf.uniform_unit_scaling_initializer(1.0)):
@@ -64,7 +68,7 @@ class QASystem(object):
             # computing learning rates
             self.learning_rate = tf.train.exponential_decay(
               self.base_lr,                               # Base learning rate.
-              self.global_batch_num_placeholder,          # Current total batch number
+              self.global_batch_num_placeholder,                      # Current total batch number
               self.decay_number,                          # decay every decay_number batch
               self.decay_rate,                            # Decay rate
               staircase = True)
@@ -73,11 +77,12 @@ class QASystem(object):
             grads = list(map(lambda x: x[0], self.grads_vars))
             vars_ = list(map(lambda x: x[1], self.grads_vars))
             grads, _ = tf.clip_by_global_norm(grads, self.max_grad_norm)
-            # self.grads_norm = [tf.norm(grad) for grad in grads]
-            # self.var_name = [var.op.name for var in vars_]
-            # self.grads_norm_w_name = zip(self.grads_norm, self.var_name)
+
             self.grads_vars_clip = zip(grads, vars_)
             self.train_op = optimizer.apply_gradients(self.grads_vars_clip)
+            if self.summary_flag:
+                tf.summary.scalar('cross_entropy', self.loss)
+                self.merged = tf.summary.merge_all()
 
         self.saver = tf.train.Saver()
 
@@ -90,7 +95,7 @@ class QASystem(object):
             self.dropout_placeholder: dropout,
             self.global_batch_num_placeholder: global_batch_num
         }
-        if len(data_batch) == 6:
+        if len(data_batch) == 7:
             feed_dict[self.ans_start_placeholder] = data_batch[4]
             feed_dict[self.ans_end_placeholder] = data_batch[5]
 
@@ -103,9 +108,9 @@ class QASystem(object):
         to assemble your reading comprehension system!
         :return:
         """
-        I = self.encoder.encode(context_embeddings, self.context_mask_placeholder, 
+        G = self.encoder.encode(context_embeddings, self.context_mask_placeholder, 
                             question_embeddings, self.question_mask_placeholder, self.dropout_placeholder)
-        pred_s, pred_e = self.decoder.decode(I, self.context_mask_placeholder, self.dropout_placeholder)
+        pred_s, pred_e = self.decoder.decode(G, self.context_mask_placeholder, self.dropout_placeholder)
 
         return pred_s, pred_e
 
@@ -116,9 +121,11 @@ class QASystem(object):
         :return:
         """
         with vs.variable_scope("loss"):
-            loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
+            # masked_pred_s = tf.add(pred_s, (1 - tf.cast(self.context_mask_placeholder, 'float')) * (-1e30))
+            # masked_pred_e = tf.add(pred_e, (1 - tf.cast(self.context_mask_placeholder, 'float')) * (-1e30))
+            loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
                 labels=self.ans_start_placeholder, logits=pred_s)) \
-            + tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
+            + tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
                 labels=self.ans_end_placeholder, logits=pred_e))
 
         return loss
@@ -129,7 +136,7 @@ class QASystem(object):
         :return:
         """
         with vs.variable_scope("embeddings"):
-            vec_embeddings = tf.get_variable("embeddings", initializer=self.pretrained_embeddings)
+            vec_embeddings = tf.get_variable("embeddings", initializer=self.pretrained_embeddings, trainable=False)
             context_embeddings = tf.nn.embedding_lookup(vec_embeddings, self.context_placeholder)
             question_embeddings = tf.nn.embedding_lookup(vec_embeddings, self.question_placeholder)
             context_embeddings = tf.reshape(context_embeddings,
@@ -139,7 +146,7 @@ class QASystem(object):
 
         return context_embeddings, question_embeddings
 
-    def optimize(self, session, train_batch, global_batch_num=0):
+    def optimize(self, session, train_batch, global_batch_num):
         """
         Takes in actual data to optimize your model
         This method is equivalent to a step() function
@@ -147,23 +154,27 @@ class QASystem(object):
         """
         input_feed = self.create_feed_dict(train_batch, 1 - self.dropout, global_batch_num)
 
-        output_feed = [self.train_op, self.loss, self.learning_rate]
+        if self.summary_flag:
+            output_feed = [self.train_op, self.loss, self.learning_rate, self.merged]
+            _, train_loss, current_lr, summary = session.run(output_feed, input_feed)
+        else:
+            output_feed = [self.train_op, self.loss, self.learning_rate]
+            _, train_loss, current_lr = session.run(output_feed, input_feed)
+            summary = None
 
-        _, train_loss, current_lr = session.run(output_feed, input_feed)
-        # print ('gradients after clipping:\n')
-        # for gv in grads_norm:
-        #     print (gv[0])
-
-        return train_loss, current_lr
+        return train_loss, current_lr, summary
 
     def run_epoch(self, sess, train_data, val_data, epoch_num, train_log):
         num_batches = int(len(train_data) / self.batch_size) + 1
         logging.info("Evaluating on training data")
         prog = Progbar(target = num_batches)
         for i, batch in enumerate(minibatches(train_data, self.batch_size)):
-            loss, current_lr = self.optimize(sess, batch, global_batch_num = epoch_num * num_batches + i)
+            global_batch_num = int(epoch_num * num_batches + i)
+            loss, current_lr, summary = self.optimize(sess, batch, global_batch_num)
             prog.update(i + 1, [("train loss", loss), ("current LR", current_lr)])
             train_log.write("{},{}\n".format(epoch_num + 1, loss))
+            if self.summary_flag:
+                self.train_writer.add_summary(summary, i)
         print("")
 
         logging.info("Evaluating on development data")
@@ -241,7 +252,7 @@ class QASystem(object):
 
         return ans
 
-    def evaluate_answer(self, session, data, rev_vocab, sample_num=100):
+    def evaluate_answer(self, session, data, rev_vocab, sample_num=200):
         """
         Evaluate the model's performance using the harmonic mean of F1 and Exact Match (EM)
         with the set of true answer labels
@@ -263,13 +274,13 @@ class QASystem(object):
         eval_batch = list(zip(*eval_batch)) # unzip the list
 
         a_s_vec, a_e_vec = self.answer(session, eval_batch)
-        for (a_s, a_e, context, a_s_true, a_e_true) in zip(a_s_vec, a_e_vec, eval_batch[0], eval_batch[4], eval_batch[5]):
+        for (a_s, a_e, context, a_true) in zip(a_s_vec, a_e_vec, eval_batch[0], eval_batch[6]):
             if a_s > a_e:
                 tmp = a_s
                 a_s = a_e
                 a_e = tmp
             predicted_answer = self.formulate_answer(context, rev_vocab, a_s, a_e)
-            true_answer = self.formulate_answer(context, rev_vocab, a_s_true, a_e_true)
+            true_answer = self.formulate_answer(context, rev_vocab, a_true[0], a_true[1])
             f1 = f1_score(predicted_answer, true_answer)
             overall_f1 += f1
             if exact_match_score(predicted_answer, true_answer):
@@ -321,8 +332,11 @@ class QASystem(object):
         train_log = open(self.train_loss_log, "w")
         val_log = open(self.val_loss_log, "w")
 
+        if self.summary_flag:
+            self.train_writer = tf.summary.FileWriter(self.summary_dir + '/train', session.graph)
+
         for epoch in range(self.n_epochs):
-            logging.info("Epoch %d out of %d", epoch + 1, self.n_epochs)
+            logging.info("\nEpoch %d out of %d", epoch + 1, self.n_epochs)
             val_score = self.run_epoch(session, train_data, val_data, epoch, train_log)
             logging.info("Average Dev Cost: {}".format(val_score))
             val_log.write("{},{}\n".format(epoch + 1, val_score))
@@ -333,6 +347,6 @@ class QASystem(object):
             if val_score < best_score:
                 best_score = val_score
                 print("New best dev score! Saving model in {}".format(train_dir + "/" + self.model_name))
-                self.saver.save(session, train_dir + "/" + self.model_name)
+                self.saver.save(session, train_dir + self.model_name, global_step=epoch)
 
         return best_score

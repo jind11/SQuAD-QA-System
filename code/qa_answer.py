@@ -14,10 +14,14 @@ import numpy as np
 from six.moves import xrange
 import tensorflow as tf
 
-from qa_model import Encoder, QASystem, Decoder
+from encoder import Encoder
+from decoder import Decoder
+from qa_model import QASystem
 from preprocessing.squad_preprocess import data_from_json, maybe_download, squad_base_url, \
     invert_map, tokenize, token_idx_map
 import qa_data
+from util import load_embeddings, pad_sequence, vectorize, minibatches, Progbar
+from train import FLAGS
 
 import logging
 
@@ -25,19 +29,8 @@ logging.basicConfig(level=logging.INFO)
 
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_float("learning_rate", 0.001, "Learning rate.")
-tf.app.flags.DEFINE_float("dropout", 0.15, "Fraction of units randomly dropped on non-recurrent connections.")
-tf.app.flags.DEFINE_integer("batch_size", 10, "Batch size to use during training.")
-tf.app.flags.DEFINE_integer("epochs", 0, "Number of epochs to train.")
-tf.app.flags.DEFINE_integer("state_size", 200, "Size of each model layer.")
-tf.app.flags.DEFINE_integer("embedding_size", 100, "Size of the pretrained vocabulary.")
-tf.app.flags.DEFINE_integer("output_size", 750, "The output size of your model.")
-tf.app.flags.DEFINE_integer("keep", 0, "How many checkpoints to keep, 0 indicates keep all.")
-tf.app.flags.DEFINE_string("train_dir", "train", "Training directory (default: ./train).")
-tf.app.flags.DEFINE_string("log_dir", "log", "Path to store log and flag files (default: ./log)")
-tf.app.flags.DEFINE_string("vocab_path", "data/squad/vocab.dat", "Path to vocab file (default: ./data/squad/vocab.dat)")
-tf.app.flags.DEFINE_string("embed_path", "", "Path to the trimmed GLoVe embedding (default: ./data/squad/glove.trimmed.{embedding_size}.npz)")
 tf.app.flags.DEFINE_string("dev_path", "data/squad/dev-v1.1.json", "Path to the JSON dev set to evaluate against (default: ./data/squad/dev-v1.1.json)")
+
 
 def initialize_model(session, model, train_dir):
     ckpt = tf.train.get_checkpoint_state(train_dir)
@@ -109,6 +102,12 @@ def prepare_dev(prefix, dev_filename, vocab):
 
     return context_data, question_data, question_uuid_data
 
+def convert_data_to_list(data):
+    ret = []
+    for line in data:
+        ids_list = [int(i) for i in line.strip().split(" ")]
+        ret.append(ids_list)
+    return ret
 
 def generate_answers(sess, model, dataset, rev_vocab):
     """
@@ -130,6 +129,26 @@ def generate_answers(sess, model, dataset, rev_vocab):
     :return:
     """
     answers = {}
+    (context, question, question_uuid_data) = dataset
+    context_data = convert_data_to_list(context)
+    question_data = convert_data_to_list(question)
+    context_padded, context_mask = pad_sequence(context_data, FLAGS.max_context_len)
+    question_padded, question_mask = pad_sequence(question_data, FLAGS.max_question_len)
+    input_data = vectorize(context_padded, context_mask, question_padded, question_mask, question_uuid_data)
+
+    batch_size = 32
+    num_batches = int(len(input_data) / batch_size) + 1
+    prog = Progbar(target = num_batches)
+    for i, batch in enumerate(minibatches(input_data, batch_size)):
+        a_s_vec, a_e_vec = model.answer(sess, batch)
+        prog.update(i + 1)
+        for (a_s, a_e, context, uuid) in zip(a_s_vec, a_e_vec, batch[0], batch[4]):
+            if a_s > a_e:
+                tmp = a_s
+                a_s = a_e
+                a_e = tmp
+            predicted_answer = model.formulate_answer(context, rev_vocab, a_s, a_e)
+            answers[uuid] = predicted_answer
 
     return answers
 
@@ -172,14 +191,14 @@ def main(_):
     dev_filename = os.path.basename(FLAGS.dev_path)
     context_data, question_data, question_uuid_data = prepare_dev(dev_dirname, dev_filename, vocab)
     dataset = (context_data, question_data, question_uuid_data)
+    embedding = tf.constant(load_embeddings(embed_path), dtype = tf.float32)
 
     # ========= Model-specific =========
-    # You must change the following code to adjust to your model
 
-    encoder = Encoder(size=FLAGS.state_size, vocab_dim=FLAGS.embedding_size)
-    decoder = Decoder(output_size=FLAGS.output_size)
+    encoder = Encoder(FLAGS.state_size, FLAGS.summary_flag, FLAGS.max_context_len, FLAGS.max_question_len)
+    decoder = Decoder(FLAGS.state_size, FLAGS.summary_flag)
 
-    qa = QASystem(encoder, decoder)
+    qa = QASystem(encoder, decoder, FLAGS, embedding, rev_vocab)
 
     with tf.Session() as sess:
         train_dir = get_normalized_train_dir(FLAGS.train_dir)

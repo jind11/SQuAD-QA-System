@@ -6,34 +6,43 @@ import logging
 import StringIO
 import numpy as np
 from numpy import array, zeros, allclose
+import tensorflow as tf
 
 logger = logging.getLogger("hw3")
 logger.setLevel(logging.DEBUG)
-logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
+# logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
+
+def variable_summaries(var, name_scope, matrix = True):
+  """Attach a lot of summaries to a Tensor (for TensorBoard visualization)."""
+
+  with tf.name_scope(name_scope):
+    mean = tf.reduce_mean(var)
+    tf.summary.scalar('mean', mean)
+    if matrix:
+        norm = tf.sqrt(tf.reduce_sum(var * var))
+        tf.summary.scalar('norm', norm)
 
 def load_preprocess_data(data_dir, max_context_len=500, max_ques_len=80, size=None):
     # read and assemble training data
     train_context = read_data(data_dir+'/train.ids.context', size)
     train_question = read_data(data_dir+'/train.ids.question', size)
     train_span = read_data(data_dir+'/train.span', size)
-    train_ans_start = list(map(lambda x: x[0], train_span))
-    train_ans_end = list(map(lambda x: x[1], train_span))
+    train_start_vector, train_end_vector = preprocess_span(train_span, max_context_len)
     train_context_pad, train_context_mask = pad_sequence(train_context, max_context_len)
     train_question_pad, train_question_mask = pad_sequence(train_question, max_ques_len)
     train_data = vectorize(train_context_pad, train_context_mask, train_question_pad, 
-                           train_question_mask, train_ans_start, train_ans_end)
+                           train_question_mask, train_start_vector, train_end_vector, train_span)
     print "Finished reading %d training data" % len(train_data)
 
     # read and assemble val data
     val_context = read_data(data_dir+'/val.ids.context', size)
     val_question = read_data(data_dir+'/val.ids.question', size)
     val_span = read_data(data_dir+'/val.span', size)
-    val_ans_start = list(map(lambda x: x[0], val_span))
-    val_ans_end = list(map(lambda x: x[1], val_span))
+    val_start_vector, val_end_vector = preprocess_span(val_span, max_context_len)
     val_context_pad, val_context_mask = pad_sequence(val_context, max_context_len)
     val_question_pad, val_question_mask = pad_sequence(val_question, max_ques_len)
     val_data = vectorize(val_context_pad, val_context_mask, val_question_pad, 
-                         val_question_mask, val_ans_start, val_ans_end)
+                         val_question_mask, val_start_vector, val_end_vector, val_span)
     print "Finished reading %d val data" % len(val_data)
 
     return train_data, val_data
@@ -52,6 +61,21 @@ def read_data(data_dir, size=None):
                     break
 
     return data
+
+def preprocess_span(span_vector, max_context_len):
+    start_span_vector = []
+    end_span_vector = []
+    for span in span_vector:
+        start_span = [0] * max_context_len
+        end_span = [0] * max_context_len
+        if span[0] < max_context_len:
+            start_span[span[0]] = 1
+        if span[1] < max_context_len:
+            end_span[span[1]] = 1
+        start_span_vector.append(start_span)
+        end_span_vector.append(end_span)
+
+    return start_span_vector, end_span_vector
 
 def pad_sequence(data, max_length):
     ret = []
